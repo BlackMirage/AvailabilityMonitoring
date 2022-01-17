@@ -21,9 +21,14 @@
 # SOFTWARE.
 
 # Hosts to be scanned
-# e.g., '192.168.1.1'
-IP = ''
+# e.g., ['192.168.1.1', '192.168.1.0/24']
+IPS = []
+# The maximum number of ips to be scanned
+MAX_IPS = 100000
+# The number of threads to be used
+THREADS = 8
+
 
 # Ports to be scanned
 # e.g., [80, 443]
-TCP_PORTS = [22, 80, 443, 5050, 8000, 9000]
+TCP_PORTS = [80, 443]
