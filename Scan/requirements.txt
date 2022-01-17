@@ -1,1 +1,2 @@
-python3-nmap
+python3-nmap==1.5.1
+elasticsearch==7.16.3

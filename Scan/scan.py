@@ -22,30 +22,72 @@
 
 #!/usr/bin/python3
 
+# Stdlib
+from socket import inet_aton, error as socket_error
+
+# Remote
 from nmap3 import NmapScanTechniques
 
+# Local
 import config
 
 
-def scan() -> dict:
+def convert_to_es(scan_results) -> dict:
+    data = {}
+    keys = list(scan_results.keys())
+    if config.IP not in keys:
+        return data
+    if 'ports' not in scan_results[config.IP]:
+        return data
+    data = scan_results
+    data['scan_results'] = scan_results[config.IP]
+    data['host'] = {}
+    data['host']['ip'] = config.IP
+    data.pop(config.IP)
+    return data
+
+
+def scan() -> tuple[dict, dict]:
     scanner = NmapScanTechniques()
     tcp_ports = ','.join([str(port) for port in config.TCP_PORTS])
-    udp_ports = ','.join([str(port) for port in config.UDP_PORTS])
     tcp_results = {}
-    udp_results = {}
-    if not config.HOST:
-        return tcp_results, udp_results
+    if not config.IP:
+        return tcp_results
     if config.TCP_PORTS:
-        tcp_results.update(scanner.nmap_tcp_scan(config.HOST, args='-p {}'.format(tcp_ports)))
-    if config.UDP_PORTS:
-        udp_results.update(scanner.nmap_udp_scan(config.HOST, args='-p {}'.format(udp_ports)))
-    return tcp_results, udp_results
+        tcp_results.update(scanner.nmap_tcp_scan(config.IP, args='-p {}'.format(tcp_ports)))
+    return tcp_results
+
+
+def validate_config() -> None:
+    # Validate on Host field
+    try:
+        inet_aton(config.IP) # IP is valid
+    except socket_error:
+        print("Error: Config's host IP address is incorrect.")
+        exit(1)
+    # Validate ports
+    for port in config.TCP_PORTS:
+        if isinstance(port, int):
+            if port > 0 and port < 65536:
+                continue
+            else:
+                print("Error: one of more TCP ports is <1 or >65535")
+                exit(1)
+        else:
+            print("Error: one or more TCP ports not an integer.")
+            exit(1)
 
 
 def main():
+    # Validation on config fields
+    validate_config()
+
     # Scan using config
-    scan_results = scan()
-    print(scan_results)
+    tcp_results = scan()
+
+    # Convert to a format that works better with ElasticSearch
+    tcp_results = convert_to_es(tcp_results)
+    print(tcp_results)
 
 
 if __name__ == '__main__':
