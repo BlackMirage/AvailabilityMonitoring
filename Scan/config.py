@@ -21,10 +21,10 @@
 # SOFTWARE.
 
 # Hosts to be scanned
-# e.g., ['192.168.1.1', 'www.google.com']
-HOSTS = []
+# e.g., '192.168.1.1' OR 'www.google.com'
+HOST = '192.168.1.1'
 
 # Ports to be scanned
 # e.g., [80, 443]
 TCP_PORTS = [80, 443]
-UDP_PORTS = []
+UDP_PORTS = [30] # May require password to use

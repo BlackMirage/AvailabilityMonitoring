@@ -26,26 +26,27 @@ from nmap3 import NmapScanTechniques
 
 import config
 
+
 def scan() -> dict:
     scanner = NmapScanTechniques()
     tcp_ports = ','.join([str(port) for port in config.TCP_PORTS])
     udp_ports = ','.join([str(port) for port in config.UDP_PORTS])
     tcp_results = {}
     udp_results = {}
-    for host in config.HOSTS:
-        if config.TCP_PORTS:
-            tcp_results = scanner.nmap_tcp_scan(host, args='-p {}'.format(tcp_ports))
-        if config.UDP_PORTS:
-            udp_results = scanner.nmap_udp_scan(host, args='-p {}'.format(udp_ports))
-    tcp_results.update(udp_results)
-    return tcp_results
-
+    if not config.HOST:
+        return tcp_results, udp_results
+    if config.TCP_PORTS:
+        tcp_results.update(scanner.nmap_tcp_scan(config.HOST, args='-p {}'.format(tcp_ports)))
+    if config.UDP_PORTS:
+        udp_results.update(scanner.nmap_udp_scan(config.HOST, args='-p {}'.format(udp_ports)))
+    return tcp_results, udp_results
 
 
 def main():
     # Scan using config
     scan_results = scan()
     print(scan_results)
+
 
 if __name__ == '__main__':
     main()
