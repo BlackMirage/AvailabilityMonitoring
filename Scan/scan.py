@@ -25,34 +25,62 @@
 # Stdlib
 from ipaddress import IPv4Network, AddressValueError
 import logging
-from queue import Queue
+from queue import Queue, Empty
 from socket import inet_aton, error as socket_error
 from threading import Thread
 
 # Remote
+from elasticsearch import Elasticsearch
 from nmap3 import NmapScanTechniques
 
 # Local
 import config
 
-def convert_to_es(scan_results: list[tuple[dict]]) -> list[dict]:
-    logging.info("Converting the scan output to one that elasticsearch parses better.")
-    list_of_scans = []
-    for scan in scan_results:
-        data = {}
-        scan_dict = scan[0]
-        keys = list(scan_dict.keys())
-        ip = scan[1]
-        if ip in keys and 'ports' in scan_dict[ip]:
-            data = scan_dict
-            data['scan_results'] = scan_dict[ip]
-            data['host'] = {}
-            data['host']['ip'] = ip
-            data.pop(ip)
-        list_of_scans.append(data)
-    return list_of_scans
+def upload_to_es(nmap_result: dict, es_instance: Elasticsearch) -> bool:
+    """
+    Uploads the nmap result to elasticsearch.
+    Input:
+        - nmap_result: a dictionary result of the nmap scan.
+        - es_instance: an Elasticsearch object used to index the nmap result.
+    """
+    _doc = nmap_result
+    if not nmap_result:
+        return False
+    res = es_instance.index(index=config.ELASTICSEARCH_INDEX, document=_doc)
+    if 'result' in res and res['result'] == 'success':
+        return True
+    else:
+        return False
 
-def scan_run(ip_queue: Queue, result_queue: Queue) -> None:
+def convert_to_es(scan_result: tuple[dict, str]) -> dict:
+    """
+    Converts a dictionary with an IP as a key to a dictionary with the IP as a value, which helps elasticsearch queries.
+    Input:
+        - scan_result: a tuple with the scanned dictionary as the first element and the IP address of the host as the second.
+    Output: a dictionary with the IP as a value.
+    """
+    logging.info("Converting the scan output to one that elasticsearch parses better.")
+    data = {}
+    scan_dict = scan_result[0]
+    keys = list(scan_dict.keys())
+    ip = scan_result[1]
+    if ip in keys and 'ports' in scan_dict[ip]:
+        data = scan_dict
+        data['scan_results'] = scan_dict[ip]
+        data['host'] = {}
+        data['host']['ip'] = ip
+        data.pop(ip)
+    return data
+
+
+def run_nmap(ip_queue: Queue, scanned_queue: Queue) -> None:
+    """
+    Worker that continually tries to pull IP addresses from an IP address queue and scan them with nmap.
+    It then outputs the nmap results to another queue passed in.
+    Input:
+        - ip_queue: the queue in which the IP addresses should be added.
+        - scanned_queue: the queue storing the scanned nmap hosts.
+    """
     scanner = NmapScanTechniques()
     tcp_ports = ','.join([str(port) for port in config.TCP_PORTS])
     while not ip_queue.empty():
@@ -61,29 +89,90 @@ def scan_run(ip_queue: Queue, result_queue: Queue) -> None:
         if ip and config.TCP_PORTS:
             logging.info("Performing scan on ({}) on ports ({})".format(ip, tcp_ports))
             tcp_results.update(scanner.nmap_tcp_scan(ip, args='-p {}'.format(tcp_ports)))
-        result_queue.put((tcp_results, ip))
+        scanned_queue.put((tcp_results, ip))
 
-def scan(ips: list[str]) -> list[dict]:
+
+def run_fill_ip_queue(ips: list[str], ip_queue: Queue):
+    """
+    Worker that fills in the IP queue with the IPs parameterized in the function.
+    Input:
+        - ips: a list of IP addresses to be entered into the queue.
+        - ip_queue: the queue in which the IP addresses should be added.
+    """
+    for ip in ips:
+        ip_queue.put(ip)
+
+
+def run_clean_and_upload(scanned_queue: Queue) -> None:
+    """
+    Worker that continually tries to upload to elasticsearch whatever it finds in its queue.
+    Additionally attempts to make the nmap output more conducive to elasticsearch queries before uploading.
+    Input:
+        - scanned_queue: a queue storing the scanned nmap hosts.
+    """
+    es = Elasticsearch([config.ELASTICSEARCH_URL])
+    while True:
+        # To do: fix hack to prevent race condition when no elements are in queues and are instead in running nmap scans
+        try:
+            nmap_result = scanned_queue.get(timeout=20)
+        except Empty:
+            break
+        if nmap_result and isinstance(nmap_result, tuple) and nmap_result[0]: # Checks if it's not an empty dict
+            modified_nmap_result = convert_to_es(nmap_result)
+            upload_to_es(modified_nmap_result, es)
+
+
+def scan(ips: list[str]) -> None:
+    """
+    Scans a list of IP addresses with nmap and sends the output to elasticsearch.
+    Input:
+        - ips: a list of IP addresses to be scanned.
+    """
     tcp_ports = ','.join([str(port) for port in config.TCP_PORTS])
     logging.debug("Performing scans on the following ips: {}".format(ips))
     logging.debug("Performing scans on the following ports: {}".format(tcp_ports))
-    ip_queue = Queue(config.MAX_IPS)
-    result_queue = Queue(config.MAX_IPS)
-    for ip in ips:
-        if not ip_queue.full():
-            ip_queue.put(ip)
-    threads = []
-    for i in range(config.THREADS):
-        thread = Thread(target=scan_run, name='thread-{}'.format(i), kwargs={'ip_queue': ip_queue, 'result_queue': result_queue})
-        threads.append(thread)
-    for thread in threads:
+    ip_queue = Queue(config.MAX_QUEUE_SIZE)
+    scanned_queue = Queue(config.MAX_QUEUE_SIZE)
+
+    # Fill up the IP queue for nmap to take
+    ip_fill_thread = Thread(target=run_fill_ip_queue, name='thread-fill-ip-queue', kwargs={'ips': ips, 'ip_queue': ip_queue})
+    ip_fill_thread.start()
+
+    # Create and start nmap threads to scan each IP in IP queue
+    nmap_threads = []
+    for i in range(config.NMAP_THREADS):
+        thread = Thread(target=run_nmap, name='thread-nmap-{}'.format(i), kwargs={'ip_queue': ip_queue, 'scanned_queue': scanned_queue})
+        nmap_threads.append(thread)
+    for thread in nmap_threads:
         thread.start()
-    for thread in threads:
+
+    # Create and start elasticsearch clean and upload thread
+    upload_threads = []
+    for i in range(config.UPLOAD_THREADS):
+        thread = Thread(target=run_clean_and_upload, name='thread-es-{}'.format(i), kwargs={'scanned_queue': scanned_queue})
+        upload_threads.append(thread)
+    for thread in upload_threads:
+        thread.start()
+
+    # Join elasticsearch threads
+    for thread in nmap_threads:
         thread.join()
-    return list(result_queue.queue)
+
+    # Join nmap threads
+    for thread in nmap_threads:
+        thread.join()
+
+    # Join fill IP queue thread
+    ip_fill_thread.join()
 
 
 def validate_config(ips: list[str]) -> None:
+    """
+    Checks done on a list of IPs to check they are valid and a check on the ports in the config.
+    Exits if errors found.
+    Input:
+        - ips: list of IP addresses to validate.
+    """
     logging.info("Validating the configurations specified in config.py")
     # Validate all ips to scan
     for ip in ips:
@@ -106,6 +195,10 @@ def validate_config(ips: list[str]) -> None:
 
 
 def expand_ips() -> list[str]:
+    """
+    Given the list of IP addresses in the config, expands IP addresses with subnets into all the addresses that exist in the subnet.
+    Output: list of expanded IP addresses from their CIDR notation in a list.
+    """
     logging.info("Expanding IP ranges.")
     ips = []
     for address in config.IPS:
@@ -117,20 +210,18 @@ def expand_ips() -> list[str]:
     logging.debug("Expanded IPs to scan: {}".format(ips))
     return ips
 
+
 def main():
     logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.DEBUG)
 
     # Expand CIDR IP ranges to an actual list of IPs
     ips = expand_ips()
+
     # Validation on config fields
     validate_config(ips)
 
     # Scan using config
-    tcp_results = scan(ips)
-
-    # Convert to a format that works better with ElasticSearch
-    tcp_results = convert_to_es(tcp_results)
-    print(tcp_results)
+    scan(ips)
 
 
 if __name__ == '__main__':

@@ -23,12 +23,25 @@
 # Hosts to be scanned
 # e.g., ['192.168.1.1', '192.168.1.0/24']
 IPS = []
-# The maximum number of ips to be scanned
-MAX_IPS = 100000
-# The number of threads to be used
-THREADS = 8
+# The number of threads to be used for scanning
+NMAP_THREADS = 8
+# The number of threads to be used for uploading to elasticsearch
+UPLOAD_THREADS = 4
 
+# Elasticsearch
+# URL
+# e.g., 'https://USERNAME:PASSWORD@elasticinstances.com:9200'
+ELASTICSEARCH_URL = ''
+ELASTICSEARCH_INDEX = ''
 
+# Nmap
 # Ports to be scanned
 # e.g., [80, 443]
 TCP_PORTS = [80, 443]
+
+
+# MISC
+# Queue size
+# The maximum size of the queue for communication between threads
+# The larger this is, the more memory you will use
+MAX_QUEUE_SIZE = 10000
